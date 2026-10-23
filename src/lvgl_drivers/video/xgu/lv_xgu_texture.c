@@ -348,6 +348,7 @@ void xgu_draw_img_decoded(struct _lv_draw_ctx_t *draw_ctx, const lv_draw_img_dsc
             if (sizeof(lv_color_t) == 2) return;
             xgu_cf = XGU_TEXTURE_FORMAT_A8R8G8B8;
             bytes_pp = sizeof(lv_color_t);
+            break;
         case LV_IMG_CF_RGB888:
             xgu_cf = XGU_TEXTURE_FORMAT_X8R8G8B8;
             bytes_pp = 4;

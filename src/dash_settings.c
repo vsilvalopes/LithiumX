@@ -198,6 +198,26 @@ static void change_items_per_row(void *param) {
     menu_force_value(number_list, dash_settings.items_per_row - min_items);
 }
 
+static void change_page_layout_submenu_cb(void *param)
+{
+    dash_settings.page_layout = (int)(intptr_t)param;
+    dash_settings_apply(true);
+}
+
+static void change_page_layout_submenu(void *param)
+{
+    (void)param;
+    menu_items_t items[] =
+        {
+            {"Game List", change_page_layout_submenu_cb, (void *)(intptr_t)DASH_LAYOUT_LIST, NULL},
+            {"Game Wall", change_page_layout_submenu_cb, (void *)(intptr_t)DASH_LAYOUT_WALL, NULL},
+        };
+
+    lv_obj_t *menu = menu_open(items, DASH_ARRAY_SIZE(items));
+    dash_settings.page_layout = LV_CLAMP(DASH_LAYOUT_LIST, dash_settings.page_layout, DASH_LAYOUT_WALL);
+    menu_force_value(menu, dash_settings.page_layout);
+}
+
 static void change_max_recent_submenu_cb(void *param)
 {
     int n = (intptr_t)param;
@@ -372,6 +392,7 @@ void dash_settings_open()
             {"", autolaunch_dvd_change_callback, NULL, NULL},
             {"Show Debug Information", debug_info_change_callback, NULL, NULL},
             {"Change How Pages are Sorted", change_page_sort_submenu, NULL, NULL},
+            {"Change Page Layout (List or Wall)", change_page_layout_submenu, NULL, NULL},
             {"Change Number of Items per Row", change_items_per_row, NULL, NULL},
             {"Change Max Recent Items Shown", change_max_recent_submenu, NULL, NULL},
             {"Change Default Start Up Page", change_startup_page_submenu, NULL, NULL},

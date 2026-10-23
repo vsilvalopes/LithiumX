@@ -64,6 +64,7 @@ set(SOURCES
     src/dash_eeprom.c
     src/dash_browser.c
     src/dash_debug.c
+    src/dash_xbe_icon.c
     src/dash_launcher.c
     src/lvgl_widgets/confirmbox.c
     src/lvgl_widgets/menu.c

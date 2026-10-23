@@ -24,6 +24,77 @@ typedef struct
 } jpeg_ll_value_t;
 static lv_ll_t jpeg_decomp_list;
 
+// Sizes used by pages shown as a list. Set in dash_scroller_init based on the screen resolution
+// so that 480p and 720p both show at least 10 titles.
+static struct
+{
+    lv_coord_t row_height;
+    lv_coord_t icon_size;
+    const lv_font_t *font;
+} list_metrics;
+
+// Returns the parser if this scroller is shown as a list with a cover panel, otherwise NULL
+static parse_handle_t *get_list_parser(lv_obj_t *scroller)
+{
+    for (int i = 0; i < DASH_MAX_PAGES; i++)
+    {
+        if (parsers[i] && parsers[i]->scroller == scroller && parsers[i]->cover_panel)
+        {
+            return parsers[i];
+        }
+    }
+    return NULL;
+}
+
+// Show the cover of title t in the cover panel. If the thumbnail is not decoded yet, the title
+// text is shown instead until jpg_decompression_complete_cb calls this again.
+static void cover_show(parse_handle_t *p, title_t *t)
+{
+    p->cover_title = t;
+    lv_label_set_text(p->cover_label, t->title);
+
+    if (t->jpg_info && t->jpg_info->mem && lv_obj_is_valid(t->jpg_info->canvas))
+    {
+        lv_coord_t pw = lv_obj_get_content_width(p->cover_panel);
+        lv_coord_t ph = lv_obj_get_content_height(p->cover_panel);
+        int w = t->jpg_info->w;
+        int h = t->jpg_info->h;
+        lv_img_set_src(p->cover_img, lv_canvas_get_img(t->jpg_info->canvas));
+        lv_img_set_size_mode(p->cover_img, LV_IMG_SIZE_MODE_REAL);
+        lv_img_set_zoom(p->cover_img, LV_MIN(pw * 256 / w, ph * 256 / h));
+        lv_obj_center(p->cover_img);
+        lv_obj_clear_flag(p->cover_img, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(p->cover_label, LV_OBJ_FLAG_HIDDEN);
+    }
+    else
+    {
+        lv_obj_add_flag(p->cover_img, LV_OBJ_FLAG_HIDDEN);
+        lv_img_set_src(p->cover_img, NULL);
+        lv_obj_clear_flag(p->cover_label, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// The decoded image of title t is about to be freed. Stop referencing it from any cover panel.
+// If the title itself is being deleted, forget it so the panel is left empty.
+static void cover_release(title_t *t, bool forget)
+{
+    for (int i = 0; i < DASH_MAX_PAGES; i++)
+    {
+        parse_handle_t *p = parsers[i];
+        if (p && p->cover_panel && p->cover_title == t && lv_obj_is_valid(p->cover_panel))
+        {
+            lv_obj_add_flag(p->cover_img, LV_OBJ_FLAG_HIDDEN);
+            lv_img_set_src(p->cover_img, NULL);
+            lv_obj_clear_flag(p->cover_label, LV_OBJ_FLAG_HIDDEN);
+            if (forget)
+            {
+                p->cover_title = NULL;
+                lv_label_set_text(p->cover_label, "");
+            }
+        }
+    }
+}
+
 void dash_scroller_set_page()
 {
     toml_array_t *pages = toml_array_in(dash_search_paths, "pages");
@@ -82,11 +153,24 @@ static void jpg_decompression_complete_cb(void *img, void *mem, int w, int h, vo
 
     lv_canvas_set_buffer(t->jpg_info->canvas, img, w, h, cf);
 
-    lv_img_set_size_mode(t->jpg_info->canvas, LV_IMG_SIZE_MODE_REAL);
-    lv_img_set_zoom(t->jpg_info->canvas, DASH_THUMBNAIL_WIDTH * 256 / w);
-    lv_obj_mark_layout_as_dirty(t->jpg_info->canvas);
-
     lv_lru_set(thumbnail_cache, &image_container, sizeof(lv_obj_t *), t, w * h * JPEG_BPP);
+
+    parse_handle_t *p = get_list_parser(lv_obj_get_parent(image_container));
+    if (p)
+    {
+        // List rows dont show the thumbnail, it is only drawn in the cover panel
+        lv_obj_add_flag(t->jpg_info->canvas, LV_OBJ_FLAG_HIDDEN);
+        if (p->cover_title == t)
+        {
+            cover_show(p, t);
+        }
+    }
+    else
+    {
+        lv_img_set_size_mode(t->jpg_info->canvas, LV_IMG_SIZE_MODE_REAL);
+        lv_img_set_zoom(t->jpg_info->canvas, DASH_THUMBNAIL_WIDTH * 256 / w);
+        lv_obj_mark_layout_as_dirty(t->jpg_info->canvas);
+    }
     lvgl_removelock();
 }
 
@@ -134,7 +218,35 @@ static void item_selection_callback(lv_event_t *event)
 
     lv_obj_t *item_container = lv_event_get_target(event);
     title_t *t = item_container->user_data;
-    if (e == LV_EVENT_FOCUSED || e == LV_EVENT_DEFOCUSED)
+    parse_handle_t *list_parser = get_list_parser(lv_obj_get_parent(item_container));
+    if (list_parser && (e == LV_EVENT_FOCUSED || e == LV_EVENT_DEFOCUSED))
+    {
+        // List rows are highlighted with the theme colour and the cover panel follows the focus
+        if (e == LV_EVENT_FOCUSED)
+        {
+            lv_obj_set_style_bg_color(item_container, lv_color_lighten(dash_base_theme_color, 40), LV_PART_MAIN);
+            lv_obj_set_style_bg_grad_color(item_container, dash_base_theme_color, LV_PART_MAIN);
+            lv_obj_set_style_bg_grad_dir(item_container, LV_GRAD_DIR_VER, LV_PART_MAIN);
+            lv_label_set_text(label_footer, t->title);
+            cover_show(list_parser, t);
+
+            // Make sure the thumbnail of the focused item gets decoded even if the row is not drawn yet
+            if (t->jpg_info)
+            {
+                lv_event_t thumb_event;
+                thumb_event.target = item_container;
+                t->jpg_info->prevent_abort = true;
+                update_thumbnail_callback(&thumb_event);
+            }
+        }
+        else
+        {
+            lv_obj_remove_local_style_prop(item_container, LV_STYLE_BG_COLOR, LV_PART_MAIN);
+            lv_obj_remove_local_style_prop(item_container, LV_STYLE_BG_GRAD_COLOR, LV_PART_MAIN);
+            lv_obj_remove_local_style_prop(item_container, LV_STYLE_BG_GRAD_DIR, LV_PART_MAIN);
+        }
+    }
+    else if (e == LV_EVENT_FOCUSED || e == LV_EVENT_DEFOCUSED)
     {
         lv_style_value_t border_width;
         lv_style_value_t border_colour;
@@ -170,7 +282,7 @@ static void item_selection_callback(lv_event_t *event)
             int new_index = *current_index;
 
             // FIXME: Should really allow thumbnails of any width
-            int tiles_per_row = lv_obj_get_width(scroller) / DASH_THUMBNAIL_WIDTH;
+            int tiles_per_row = (list_parser) ? 1 : lv_obj_get_width(scroller) / DASH_THUMBNAIL_WIDTH;
 
             // At the start, loop to end
             if (*current_index <= 1 && key == LV_KEY_UP)
@@ -265,6 +377,13 @@ static void item_deletion_callback(lv_event_t *event)
 {
     lv_obj_t *item_container = lv_event_get_target(event);
     title_t *t = item_container->user_data;
+    cover_release(t, true);
+    if (t->icon)
+    {
+        // The lv_img showing it is a child of item_container so is deleted with it
+        dash_xbe_icon_free(t->icon);
+        t->icon = NULL;
+    }
     if (t->jpg_info)
     {
         t->jpg_info->decomp_handle = NULL;
@@ -328,9 +447,37 @@ static int item_scan_callback(void *param, int argc, char **argv, char **azColNa
     return 0;
 }
 
+// Read the title image from the XBE and show it in the row's icon holder. Called from the scan thread.
+static void list_icon_add(lv_obj_t *item_container, const char *xbe_path)
+{
+    lv_img_dsc_t *icon = dash_xbe_icon_load(xbe_path, list_metrics.icon_size);
+
+    lvgl_getlock();
+    title_t *t = item_container->user_data;
+    lv_obj_t *icon_holder = lv_obj_get_child(item_container, 0);
+    t->icon = icon;
+    if (icon)
+    {
+        lv_obj_t *img = lv_img_create(icon_holder);
+        lv_img_set_src(img, icon);
+        lv_obj_center(img);
+    }
+    else
+    {
+        // No title image in the XBE, show a generic symbol instead
+        lv_obj_t *symbol = lv_label_create(icon_holder);
+        lv_obj_set_style_text_font(symbol, list_metrics.font, LV_PART_MAIN);
+        lv_obj_set_style_text_color(symbol, lv_color_make(128, 128, 128), LV_PART_MAIN);
+        lv_label_set_text(symbol, LV_SYMBOL_FILE);
+        lv_obj_center(symbol);
+    }
+    lvgl_removelock();
+}
+
 static void item_scan_add(lv_obj_t *scroller, item_strings_callback_t *item_cb)
 {
     item_strings_t *item = item_cb->head;
+    bool is_list = get_list_parser(scroller) != NULL;
     // First we add all the items to lvgl so they display quickly
     while (item)
     {
@@ -341,6 +488,7 @@ static void item_scan_add(lv_obj_t *scroller, item_strings_callback_t *item_cb)
             continue;
         }
         t->jpg_info = NULL;
+        t->icon = NULL;
         t->title[0] = '\0';
         t->db_id = atoi(item->id);
 
@@ -350,16 +498,51 @@ static void item_scan_add(lv_obj_t *scroller, item_strings_callback_t *item_cb)
         item_container->user_data = t;
         lv_obj_add_style(item_container, &titleview_image_container_style, LV_PART_MAIN);
         lv_obj_clear_flag(item_container, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_height(item_container, DASH_THUMBNAIL_HEIGHT);
-        lv_obj_set_width(item_container, DASH_THUMBNAIL_WIDTH);
 
-        // Create a label with the game title
-        lv_obj_t *label = lv_label_create(item_container);
-        lv_obj_add_style(label, &titleview_image_text_style, LV_PART_MAIN);
-        lv_obj_set_width(label, DASH_THUMBNAIL_WIDTH);
-        lv_obj_update_layout(label);
-        lv_label_set_text(label, item->title);
-        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+        if (is_list)
+        {
+            // One row per title with the XBE icon on the left and the title on the right.
+            // Only a separator line between rows.
+            lv_obj_set_height(item_container, list_metrics.row_height);
+            lv_obj_set_width(item_container, lv_pct(100));
+            lv_obj_set_style_border_side(item_container, LV_BORDER_SIDE_BOTTOM, LV_PART_MAIN);
+            lv_obj_set_style_radius(item_container, 4, LV_PART_MAIN);
+            lv_obj_set_style_pad_hor(item_container, 6, LV_PART_MAIN);
+            lv_obj_set_style_pad_column(item_container, 10, LV_PART_MAIN);
+            lv_obj_set_layout(item_container, LV_LAYOUT_FLEX);
+            lv_obj_set_flex_flow(item_container, LV_FLEX_FLOW_ROW);
+            lv_obj_set_flex_align(item_container, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+            // Holder for the icon (child 0). The icon is loaded later in the background
+            lv_obj_t *icon_holder = lv_obj_create(item_container);
+            lv_obj_remove_style_all(icon_holder);
+            lv_obj_clear_flag(icon_holder, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_size(icon_holder, list_metrics.icon_size, list_metrics.icon_size);
+
+            // Fixed single line height so long titles are truncated with dots instead of wrapping
+            lv_obj_t *label = lv_label_create(item_container);
+            lv_obj_add_style(label, &titleview_image_text_style, LV_PART_MAIN);
+            lv_obj_set_style_text_font(label, list_metrics.font, LV_PART_MAIN);
+            lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+            lv_obj_set_style_align(label, LV_ALIGN_DEFAULT, LV_PART_MAIN);
+            lv_obj_set_height(label, lv_font_get_line_height(list_metrics.font));
+            lv_obj_set_flex_grow(label, 1);
+            lv_label_set_text(label, item->title);
+            lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+        }
+        else
+        {
+            // Create a label with the game title
+            lv_obj_t *label = lv_label_create(item_container);
+            lv_obj_add_style(label, &titleview_image_text_style, LV_PART_MAIN);
+            lv_obj_set_height(item_container, DASH_THUMBNAIL_HEIGHT);
+            lv_obj_set_width(item_container, DASH_THUMBNAIL_WIDTH);
+
+            lv_obj_set_width(label, DASH_THUMBNAIL_WIDTH);
+            lv_obj_update_layout(label);
+            lv_label_set_text(label, item->title);
+            lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+        }
 
         lv_group_add_obj(lv_group_get_default(), item_container);
         lv_obj_add_event_cb(item_container, item_selection_callback, LV_EVENT_KEY, NULL);
@@ -379,6 +562,11 @@ static void item_scan_add(lv_obj_t *scroller, item_strings_callback_t *item_cb)
     {
         lv_obj_t *item_container = item->item_container;
         title_t *t = item_container->user_data;
+
+        if (is_list)
+        {
+            list_icon_add(item_container, item->launch_path);
+        }
 
         // Check if a thumbnail exists
         strcpy(thumb_path, item->launch_path);
@@ -487,6 +675,7 @@ static int db_scan_thread_f(void *param)
 
 static void cache_free(title_t *t)
 {
+    cover_release(t, false);
     assert(lv_obj_is_valid(t->jpg_info->canvas));
     jpeg_decoder_abort(t->jpg_info->decomp_handle);
     assert(t->jpg_info->mem);
@@ -556,6 +745,20 @@ void dash_scroller_init()
     page_current = dash_settings.startup_page_index;
 
     lv_memset(parsers, 0, sizeof(parsers));
+
+    if (h >= 720)
+    {
+        list_metrics.row_height = 46;
+        list_metrics.icon_size = 38;
+        list_metrics.font = &lv_font_montserrat_18;
+    }
+    else
+    {
+        list_metrics.row_height = 34;
+        list_metrics.icon_size = 28;
+        list_metrics.font = &lv_font_montserrat_14;
+    }
+
     thumbnail_cache = lv_lru_create(thumbnail_cache_size, 175 * 248 * JPEG_BPP,
                                     (lv_lru_free_t *)cache_free, NULL);
 
@@ -573,8 +776,12 @@ void dash_scroller_init()
 
     // Create a footer label which shows the current item name
     label_footer = lv_label_create(lv_scr_act());
-    lv_obj_align(label_footer, LV_ALIGN_BOTTOM_MID, 0, -DASH_YMARGIN);
+    lv_obj_align(label_footer, LV_ALIGN_BOTTOM_LEFT, DASH_XMARGIN, -DASH_YMARGIN);
     lv_obj_add_style(label_footer, &titleview_header_footer_style, LV_PART_MAIN);
+    // Single line, long titles are truncated with dots
+    lv_obj_set_size(label_footer, w - (2 * DASH_XMARGIN),
+                    lv_font_get_line_height(lv_obj_get_style_text_font(label_footer, LV_PART_MAIN)));
+    lv_label_set_long_mode(label_footer, LV_LABEL_LONG_DOT);
     lv_label_set_text(label_footer, "");
     lv_obj_update_layout(label_footer);
 }
@@ -621,7 +828,7 @@ void dash_scroller_scan_db()
             strncpy(parser->page_title, name_str.u.s, sizeof(parser->page_title) - 1);
         }
         lv_label_set_text(label_page_title, parser->page_title);
-        lv_obj_align(label_page_title, LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_align(label_page_title, LV_ALIGN_TOP_LEFT, 0, 0);
         lv_obj_add_style(label_page_title, &titleview_header_footer_style, LV_PART_MAIN);
         lv_obj_update_layout(label_page_title);
 
@@ -632,17 +839,55 @@ void dash_scroller_scan_db()
         int sc_w = sc_parent_w - (sc_parent_w % DASH_THUMBNAIL_WIDTH);
         int sc_h = sc_parent_h - lv_obj_get_height(label_page_title) - lv_obj_get_height(label_footer);
         lv_obj_add_style(*scroller, &titleview_style, LV_PART_MAIN);
-        lv_obj_align(*scroller, LV_ALIGN_TOP_MID, 0, lv_obj_get_height(label_page_title));
-        lv_obj_set_width(*scroller, sc_w);
         lv_obj_set_height(*scroller, sc_h);
         // Use flex layout, so new titles automatically get positioned nicely.
         lv_obj_set_layout(*scroller, LV_LAYOUT_FLEX);
-        lv_obj_set_flex_flow(*scroller, LV_FLEX_FLOW_ROW_WRAP);
+
+        if (dash_settings.page_layout == DASH_LAYOUT_LIST)
+        {
+            // List of titles on the left with the cover of the selected title on the right.
+            // The cover panel is sized to fit a cover (DASH_THUMBNAIL_HEIGHT / DASH_THUMBNAIL_WIDTH aspect)
+            // at the full panel height. On 4:3 that is limited by width so the list keeps enough room,
+            // on 16:9 the extra width goes to the list.
+            const int gap = 8;
+            int cover_w = (int)(sc_h / 1.4f) + (2 * gap);
+            cover_w = LV_MIN(cover_w, sc_parent_w * 45 / 100);
+            int list_w = sc_parent_w - cover_w - gap;
+            lv_obj_align(*scroller, LV_ALIGN_TOP_LEFT, 0, lv_obj_get_height(label_page_title));
+            lv_obj_set_width(*scroller, list_w);
+            lv_obj_set_flex_flow(*scroller, LV_FLEX_FLOW_COLUMN);
+
+            parser->cover_panel = lv_obj_create(*tile);
+            lv_obj_add_style(parser->cover_panel, &titleview_style, LV_PART_MAIN);
+            lv_obj_set_style_pad_all(parser->cover_panel, gap, LV_PART_MAIN);
+            lv_obj_clear_flag(parser->cover_panel, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_set_size(parser->cover_panel, cover_w, sc_h);
+            lv_obj_align(parser->cover_panel, LV_ALIGN_TOP_RIGHT, 0, lv_obj_get_height(label_page_title));
+
+            // Shown when the selected title has no cover art (or it is still loading)
+            parser->cover_label = lv_label_create(parser->cover_panel);
+            lv_obj_add_style(parser->cover_label, &titleview_image_text_style, LV_PART_MAIN);
+            lv_obj_set_width(parser->cover_label, lv_pct(100));
+            lv_label_set_long_mode(parser->cover_label, LV_LABEL_LONG_WRAP);
+            lv_label_set_text(parser->cover_label, "");
+
+            parser->cover_img = lv_img_create(parser->cover_panel);
+            lv_obj_add_flag(parser->cover_img, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_update_layout(parser->cover_panel);
+        }
+        else
+        {
+            lv_obj_align(*scroller, LV_ALIGN_TOP_MID, 0, lv_obj_get_height(label_page_title));
+            lv_obj_set_width(*scroller, sc_w);
+            lv_obj_set_flex_flow(*scroller, LV_FLEX_FLOW_ROW_WRAP);
+        }
         lv_obj_update_layout(*scroller);
 
         // Create atleast ONE item in the scroller. This is just a null item when nothing is present
         title_t *t = lv_mem_alloc(sizeof(title_t));
         t->db_id = -1;
+        t->jpg_info = NULL;
+        t->icon = NULL;
         strcpy(t->title, "No item selected");
         lv_obj_t *null_item = lv_obj_create(*scroller);
         null_item->user_data = t;

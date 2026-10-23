@@ -22,8 +22,14 @@ typedef struct dash_settings {
     int max_recent_items;
     int items_per_row;
     char earliest_recent_date[20]; //"YYYY-MM-DD HH:MM:SS"
-    char sort_strings[4096]; //Like "Games=1 Apps=1\0" etc.
+    // Shrunk by sizeof(int) to make room for page_layout. This keeps the struct the same size so
+    // settings saved by older versions still load. Their page_layout reads as 0 (DASH_LAYOUT_LIST).
+    char sort_strings[4096 - sizeof(int)]; //Like "Games=1 Apps=1\0" etc.
+    int page_layout; // DASH_LAYOUT_LIST or DASH_LAYOUT_WALL
 } dash_settings_t;
+
+#define DASH_LAYOUT_LIST 0
+#define DASH_LAYOUT_WALL 1
 
 void dash_settings_open(void);
 void dash_settings_apply(bool confirm_box);

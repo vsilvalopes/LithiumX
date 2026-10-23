@@ -34,6 +34,7 @@ int strcasecmp(const char *s1, const char *s2);
 #include "dash_browser.h"
 #include "dash_launcher.h"
 #include "dash_debug.h"
+#include "dash_xbe_icon.h"
 
 #include "lvgl_drivers/lv_port_disp.h"
 #include "lvgl_drivers/lv_port_indev.h"
@@ -142,6 +143,12 @@ typedef struct
     void *db_scan_thread;
     lv_obj_t *tile;     // The tile in the tileview parent 'pagetiles'
     lv_obj_t *scroller; // The scroller contains image containers for each item
+    // Pages shown as a list (i.e Recent) have a side panel that shows the cover of the focused item.
+    // These are NULL for pages shown as a wall of thumbnails.
+    lv_obj_t *cover_panel;
+    lv_obj_t *cover_img;
+    lv_obj_t *cover_label;
+    void *cover_title; // title_t currently shown in the cover panel
 } parse_handle_t;
 
 typedef struct
@@ -161,6 +168,7 @@ typedef struct
     int db_id;
     char title[MAX_META_LEN];
     jpg_info_t *jpg_info;
+    lv_img_dsc_t *icon; // Title image from the XBE, only loaded for pages shown as a list
 } title_t;
 
 #ifndef NANO_DEBUG_LEVEL
